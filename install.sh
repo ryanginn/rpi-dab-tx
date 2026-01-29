@@ -41,7 +41,11 @@ check_error() {
 install_git_repo() {
   local repo_url=$1
   local folder_name=$2
-  local config_flags=${3:-}
+  shift 2
+  # Collect remaining arguments as flags
+  local config_flags=("$@")
+
+  echo -e "${GREEN}Processing $folder_name...${NC}"
 
   if [[ ! -d $folder_name ]]; then
     git clone "$repo_url" "$folder_name"
@@ -49,14 +53,30 @@ install_git_repo() {
   fi
 
   pushd "$folder_name" >/dev/null
-  ./bootstrap && ./configure $config_flags
-  check_error "bootstrap/configure in $folder_name"
+  
+  # Smart detection of bootstrap scripts
+  if [[ -f "./bootstrap" ]]; then
+    ./bootstrap
+  elif [[ -f "./bootstrap.sh" ]]; then
+    ./bootstrap.sh
+  elif [[ -f "./autogen.sh" ]]; then
+    ./autogen.sh
+  else
+    autoreconf -fi
+  fi
+  check_error "bootstrap in $folder_name"
+
+  # Run configure with flags passed as an array to handle spaces/quotes correctly
+  ./configure "${config_flags[@]}"
+  check_error "configure in $folder_name"
 
   make -j"$(nproc)"
   check_error "make in $folder_name"
 
   sudo make install
   check_error "make install in $folder_name"
+  
+  sudo ldconfig
   popd >/dev/null
 }
 
@@ -69,15 +89,19 @@ echo "Updating system and installing dependencies..."
 sudo apt-get update && sudo apt-get upgrade -y
 check_error "system update/upgrade"
 
+# Fixed: Added libboost-all-dev, libfftw3-dev, and libasound2-dev (now required by ODR)
 sudo apt-get install -y \
-  build-essential automake libtool python3-pip libzmq3-dev libzmq5 \
-  libvlc-dev vlc-data vlc-plugin-base libcurl4-openssl-dev pkg-config \
-  supervisor python3-cherrypy3 python3-jinja2 python3-serial python3-yaml python3-pysnmp4
+  build-essential automake autoconf libtool git pkg-config \
+  libboost-all-dev libzmq3-dev libzmq5 libfftw3-dev libasound2-dev \
+  libvlc-dev vlc-data vlc-plugin-base libcurl4-openssl-dev \
+  supervisor python3-pip python3-cherrypy3 python3-jinja2 \
+  python3-serial python3-yaml python3-pysnmp4
 check_error "package installation"
 
 # Python packages
 echo "Installing Python packages..."
-pip_packages=("cherrypy" "jinja2" "pysnmp" "pyyaml==5.4.1")
+# Fixed: pyyaml>=6.0.1 is required for Python 3.12+
+pip_packages=("cherrypy" "jinja2" "pysnmp" "pyyaml>=6.0.1")
 for package in "${pip_packages[@]}"; do
   sudo pip install --break-system-packages "$package"
   check_error "pip package ($package)"
@@ -90,12 +114,16 @@ pushd "$TOOLS_DIR" >/dev/null
 
 # Install repositories
 echo "Installing ODR-mmbTools..."
+# Note: fdk-aac first so others can link to it
+install_git_repo "https://github.com/Opendigitalradio/fdk-aac.git" "fdk-aac"
 install_git_repo "https://github.com/Opendigitalradio/ODR-AudioEnc.git" "ODR-AudioEnc" "--enable-vlc"
 install_git_repo "https://github.com/Opendigitalradio/ODR-PadEnc.git" "ODR-PadEnc"
 install_git_repo "https://github.com/Opendigitalradio/ODR-DabMux.git" "ODR-DabMux"
+
+# Fixed the quoting for ODR-DabMod to prevent "unrecognized option" error
 install_git_repo "https://github.com/Opendigitalradio/ODR-DabMod.git" "ODR-DabMod" \
-  "CFLAGS='-O3 -DNDEBUG' CXXFLAGS='-O3 -DNDEBUG' --enable-fast-math --disable-output-uhd --disable-zeromq"
-install_git_repo "https://github.com/Opendigitalradio/fdk-aac.git" "fdk-aac"
+  "CFLAGS=-O3 -DNDEBUG" "CXXFLAGS=-O3 -DNDEBUG" "--enable-fast-math" "--disable-output-uhd" "--disable-zeromq"
+
 install_git_repo "https://github.com/Opendigitalradio/ODR-SourceCompanion.git" "ODR-SourceCompanion"
 
 # User group setup
@@ -115,10 +143,13 @@ EOF
 fi
 
 echo "Linking Supervisor configuration files..."
-sudo ln -sf "${CONFIG_DIR}/supervisor/"*.conf /etc/supervisor/conf.d/
+mkdir -p "${CONFIG_DIR}/supervisor/"
+if ls "${CONFIG_DIR}/supervisor/"*.conf >/dev/null 2>&1; then
+    sudo ln -sf "${CONFIG_DIR}/supervisor/"*.conf /etc/supervisor/conf.d/
+fi
 
-sudo supervisorctl reread
-sudo supervisorctl reload
+sudo supervisorctl reread || true
+sudo supervisorctl reload || true
 
 popd >/dev/null
 echo -e "${GREEN}Installation complete. Script by StefCodes.${NC}"
