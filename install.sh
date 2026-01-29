@@ -13,8 +13,10 @@ set -euo pipefail
 HOME_DIR="${HOME}"
 TOOLS_DIR="${HOME_DIR}/ODR-mmbTools"
 CONFIG_DIR="${HOME_DIR}/dab"
+SCRIPT_SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUPERVISOR_CONF="/etc/supervisor/supervisord.conf"
 SUPERVISOR_PORT=8001
+CURRENT_USER="$(id -un)"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -42,7 +44,6 @@ install_git_repo() {
   local repo_url=$1
   local folder_name=$2
   shift 2
-  # Collect remaining arguments as flags
   local config_flags=("$@")
 
   echo -e "${GREEN}Processing $folder_name...${NC}"
@@ -54,7 +55,6 @@ install_git_repo() {
 
   pushd "$folder_name" >/dev/null
   
-  # Smart detection of bootstrap scripts
   if [[ -f "./bootstrap" ]]; then
     ./bootstrap
   elif [[ -f "./bootstrap.sh" ]]; then
@@ -66,7 +66,6 @@ install_git_repo() {
   fi
   check_error "bootstrap in $folder_name"
 
-  # Run configure with flags passed as an array to handle spaces/quotes correctly
   ./configure "${config_flags[@]}"
   check_error "configure in $folder_name"
 
@@ -89,7 +88,6 @@ echo "Updating system and installing dependencies..."
 sudo apt-get update && sudo apt-get upgrade -y
 check_error "system update/upgrade"
 
-# Fixed: Added libboost-all-dev, libfftw3-dev, and libasound2-dev (now required by ODR)
 sudo apt-get install -y \
   build-essential automake autoconf libtool git pkg-config \
   libboost-all-dev libzmq3-dev libzmq5 libfftw3-dev libasound2-dev \
@@ -100,7 +98,6 @@ check_error "package installation"
 
 # Python packages
 echo "Installing Python packages..."
-# Fixed: pyyaml>=6.0.1 is required for Python 3.12+
 pip_packages=("cherrypy" "jinja2" "pysnmp" "pyyaml>=6.0.1")
 for package in "${pip_packages[@]}"; do
   sudo pip install --break-system-packages "$package"
@@ -108,28 +105,43 @@ for package in "${pip_packages[@]}"; do
 done
 
 # Prepare directories
-echo "Creating tools directory at $TOOLS_DIR..."
+echo "Creating directory structure at $CONFIG_DIR..."
 mkdir -p "$TOOLS_DIR"
-pushd "$TOOLS_DIR" >/dev/null
+mkdir -p "$CONFIG_DIR/supervisor"
+mkdir -p "$CONFIG_DIR/logs"
+
+# Copy repo contents to ~/dab
+echo "Searching for source 'dab' folder in $SCRIPT_SRC_DIR..."
+if [[ -d "${SCRIPT_SRC_DIR}/dab" ]]; then
+    echo "Found source folder. Copying contents..."
+    cp -rv "${SCRIPT_SRC_DIR}/dab/"* "$CONFIG_DIR/"
+    
+    # --- NEW: Patch configurations for the current user ---
+    echo "Patching configurations: replacing user 'pi' with '$CURRENT_USER'..."
+    find "$CONFIG_DIR" -type f -name "*.conf" -exec sed -i "s/user=pi/user=$CURRENT_USER/g" {} +
+    find "$CONFIG_DIR" -type f -name "*.conf" -exec sed -i "s/\/home\/pi/\/home\/$CURRENT_USER/g" {} +
+    
+    sudo chown -R "$(id -u):$(id -g)" "$CONFIG_DIR"
+    echo "Files copied and patched successfully."
+else
+    echo -e "${RED}ERROR: Source 'dab' folder NOT FOUND at ${SCRIPT_SRC_DIR}/dab${NC}"
+fi
 
 # Install repositories
-echo "Installing ODR-mmbTools..."
-# Note: fdk-aac first so others can link to it
+pushd "$TOOLS_DIR" >/dev/null
 install_git_repo "https://github.com/Opendigitalradio/fdk-aac.git" "fdk-aac"
 install_git_repo "https://github.com/Opendigitalradio/ODR-AudioEnc.git" "ODR-AudioEnc" "--enable-vlc"
 install_git_repo "https://github.com/Opendigitalradio/ODR-PadEnc.git" "ODR-PadEnc"
 install_git_repo "https://github.com/Opendigitalradio/ODR-DabMux.git" "ODR-DabMux"
-
-# Fixed the quoting for ODR-DabMod to prevent "unrecognized option" error
 install_git_repo "https://github.com/Opendigitalradio/ODR-DabMod.git" "ODR-DabMod" \
   "CFLAGS=-O3 -DNDEBUG" "CXXFLAGS=-O3 -DNDEBUG" "--enable-fast-math" "--disable-output-uhd" "--disable-zeromq"
-
 install_git_repo "https://github.com/Opendigitalradio/ODR-SourceCompanion.git" "ODR-SourceCompanion"
+popd >/dev/null
 
 # User group setup
 echo "Adding user to required groups..."
-sudo usermod --append --group dialout "$(id -un)"
-sudo usermod --append --group audio "$(id -un)"
+sudo usermod --append --group dialout "$CURRENT_USER"
+sudo usermod --append --group audio "$CURRENT_USER"
 
 # Supervisor config
 if ! grep -q "inet_http_server" "$SUPERVISOR_CONF"; then
@@ -142,14 +154,19 @@ password = odr
 EOF
 fi
 
-echo "Linking Supervisor configuration files..."
-mkdir -p "${CONFIG_DIR}/supervisor/"
+# Link Supervisor configuration files
+echo "Linking configuration files to Supervisor..."
 if ls "${CONFIG_DIR}/supervisor/"*.conf >/dev/null 2>&1; then
     sudo ln -sf "${CONFIG_DIR}/supervisor/"*.conf /etc/supervisor/conf.d/
+    echo "Links created successfully."
+else
+    echo -e "${RED}Warning: No .conf files found in ${CONFIG_DIR}/supervisor/ to link.${NC}"
 fi
 
-sudo supervisorctl reread || true
-sudo supervisorctl reload || true
+echo "Restarting Supervisor..."
+sudo systemctl restart supervisor
+sleep 2
+sudo supervisorctl reread
+sudo supervisorctl update
 
-popd >/dev/null
-echo -e "${GREEN}Installation complete. Script by StefCodes.${NC}"
+echo -e "${GREEN}Installation complete. Configuration patched for user: $CURRENT_USER${NC}"
