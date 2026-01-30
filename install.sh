@@ -55,6 +55,11 @@ install_git_repo() {
 
   pushd "$folder_name" >/dev/null
   
+  # Force a clean to ensure MagickWand is detected if re-running
+  if [[ -f "Makefile" ]]; then
+    make clean || true
+  fi
+
   if [[ -f "./bootstrap" ]]; then
     ./bootstrap
   elif [[ -f "./bootstrap.sh" ]]; then
@@ -88,10 +93,12 @@ echo "Updating system and installing dependencies..."
 sudo apt-get update && sudo apt-get upgrade -y
 check_error "system update/upgrade"
 
+# Essential: libmagickwand-dev added for PNG/JPG support in PadEnc
 sudo apt-get install -y \
   build-essential automake autoconf libtool git pkg-config \
   libboost-all-dev libzmq3-dev libzmq5 libfftw3-dev libasound2-dev \
   libvlc-dev vlc-data vlc-plugin-base libcurl4-openssl-dev \
+  libmagickwand-dev \
   supervisor python3-pip python3-cherrypy3 python3-jinja2 \
   python3-serial python3-yaml python3-pysnmp4
 check_error "package installation"
@@ -104,31 +111,37 @@ for package in "${pip_packages[@]}"; do
   check_error "pip package ($package)"
 done
 
-# Prepare directories
-echo "Creating directory structure at $CONFIG_DIR..."
+# Prepare tools directory
 mkdir -p "$TOOLS_DIR"
-mkdir -p "$CONFIG_DIR/supervisor"
-mkdir -p "$CONFIG_DIR/logs"
 
-# Copy repo contents to ~/dab
-echo "Searching for source 'dab' folder in $SCRIPT_SRC_DIR..."
-if [[ -d "${SCRIPT_SRC_DIR}/dab" ]]; then
-    echo "Found source folder. Copying contents..."
-    cp -rv "${SCRIPT_SRC_DIR}/dab/"* "$CONFIG_DIR/"
-    
-    # --- NEW: Patch configurations for the current user ---
-    echo "Patching configurations: replacing user 'pi' with '$CURRENT_USER'..."
-    find "$CONFIG_DIR" -type f -name "*.conf" -exec sed -i "s/user=pi/user=$CURRENT_USER/g" {} +
-    find "$CONFIG_DIR" -type f -name "*.conf" -exec sed -i "s/\/home\/pi/\/home\/$CURRENT_USER/g" {} +
-    
-    sudo chown -R "$(id -u):$(id -g)" "$CONFIG_DIR"
-    echo "Files copied and patched successfully."
+# Handle the DAB configuration directory
+if [[ -d "$CONFIG_DIR" ]]; then
+    echo -e "${GREEN}Directory $CONFIG_DIR already exists. Skipping copy to prevent overwriting your configs.${NC}"
 else
-    echo -e "${RED}ERROR: Source 'dab' folder NOT FOUND at ${SCRIPT_SRC_DIR}/dab${NC}"
+    echo "Creating directory structure at $CONFIG_DIR..."
+    mkdir -p "$CONFIG_DIR/supervisor"
+    mkdir -p "$CONFIG_DIR/logs"
+
+    echo "Searching for source 'dab' folder in $SCRIPT_SRC_DIR..."
+    if [[ -d "${SCRIPT_SRC_DIR}/dab" ]]; then
+        echo "Found source folder. Copying contents..."
+        cp -rv "${SCRIPT_SRC_DIR}/dab/"* "$CONFIG_DIR/"
+        
+        # Patch configurations for the current user
+        echo "Patching configurations: replacing user 'pi' with '$CURRENT_USER'..."
+        find "$CONFIG_DIR" -type f -name "*.conf" -exec sed -i "s/user=pi/user=$CURRENT_USER/g" {} +
+        find "$CONFIG_DIR" -type f -name "*.conf" -exec sed -i "s/\/home\/pi/\/home\/$CURRENT_USER/g" {} +
+        
+        sudo chown -R "$(id -u):$(id -g)" "$CONFIG_DIR"
+        echo "Files copied and patched successfully."
+    else
+        echo -e "${RED}Warning: Source 'dab' folder NOT FOUND at ${SCRIPT_SRC_DIR}/dab. Skipping copy.${NC}"
+    fi
 fi
 
 # Install repositories
 pushd "$TOOLS_DIR" >/dev/null
+# fdk-aac first as it is a core dependency
 install_git_repo "https://github.com/Opendigitalradio/fdk-aac.git" "fdk-aac"
 install_git_repo "https://github.com/Opendigitalradio/ODR-AudioEnc.git" "ODR-AudioEnc" "--enable-vlc"
 install_git_repo "https://github.com/Opendigitalradio/ODR-PadEnc.git" "ODR-PadEnc"
@@ -169,4 +182,4 @@ sleep 2
 sudo supervisorctl reread
 sudo supervisorctl update
 
-echo -e "${GREEN}Installation complete. Configuration patched for user: $CURRENT_USER${NC}"
+echo -e "${GREEN}Installation complete. Configuration preserved at: $CONFIG_DIR${NC}"
