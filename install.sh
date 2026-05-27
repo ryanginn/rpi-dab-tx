@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# install.sh - Install the ODR-mmbTools software stack
-# Copyright (C) 2023 StefCodes (stefcodes.co.uk)
+# install.sh - Install the ODR-mmbTools software stack (Enhanced Version)
+# Copyright (C) 2023-2026 StefCodes
 #
 # Licensed under the GNU General Public License v3.0 or later.
 # See: https://www.gnu.org/licenses/gpl-3.0.en.html
@@ -43,7 +43,8 @@ check_error() {
 install_git_repo() {
   local repo_url=$1
   local folder_name=$2
-  shift 2
+  local checkout_branch=${3:-""}
+  shift 3
   local config_flags=("$@")
 
   echo -e "${GREEN}Processing $folder_name...${NC}"
@@ -55,7 +56,14 @@ install_git_repo() {
 
   pushd "$folder_name" >/dev/null
   
-  # Force a clean to ensure MagickWand is detected if re-running
+  # Handle specific branch checkout if requested
+  if [[ -n "$checkout_branch" ]]; then
+    echo "Checking out branch/tag: $checkout_branch"
+    git checkout "$checkout_branch"
+    check_error "git checkout $checkout_branch in $folder_name"
+  fi
+
+  # Force a clean to ensure MagickWand/GStreamer is detected properly if re-running
   if [[ -f "Makefile" ]]; then
     make clean || true
   fi
@@ -93,12 +101,16 @@ echo "Updating system and installing dependencies..."
 sudo apt-get update && sudo apt-get upgrade -y
 check_error "system update/upgrade"
 
-# Essential: libmagickwand-dev added for PNG/JPG support in PadEnc
+# Combined dependency list including both original packages and new multimedia/utility frameworks
 sudo apt-get install -y \
-  build-essential automake autoconf libtool git pkg-config \
-  libboost-all-dev libzmq3-dev libzmq5 libfftw3-dev libasound2-dev \
+  build-essential automake autoconf libtool git pkg-config wget \
+  sox alsa-tools alsa-utils mpg123 ncdu vim ntp links cpufrequtils \
+  libboost-all-dev libboost-system-dev libzmq3-dev libzmq5 libfftw3-dev libasound2-dev \
   libvlc-dev vlc-data vlc-plugin-base libcurl4-openssl-dev \
-  libmagickwand-dev \
+  libmagickwand-dev libfaad2 libfaad-dev python3-mako \
+  libjack-jackd2-dev jackd2 \
+  gstreamer1.0-plugins-bad gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly \
+  libgstreamer-plugins-bad1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev \
   supervisor python3-pip python3-cherrypy3 python3-jinja2 \
   python3-serial python3-yaml python3-pysnmp4
 check_error "package installation"
@@ -141,14 +153,31 @@ fi
 
 # Install repositories
 pushd "$TOOLS_DIR" >/dev/null
-# fdk-aac first as it is a core dependency
-install_git_repo "https://github.com/Opendigitalradio/fdk-aac.git" "fdk-aac"
-install_git_repo "https://github.com/Opendigitalradio/ODR-AudioEnc.git" "ODR-AudioEnc" "--enable-vlc"
-install_git_repo "https://github.com/Opendigitalradio/ODR-PadEnc.git" "ODR-PadEnc"
-install_git_repo "https://github.com/Opendigitalradio/ODR-DabMux.git" "ODR-DabMux"
-install_git_repo "https://github.com/Opendigitalradio/ODR-DabMod.git" "ODR-DabMod" \
+
+# 1. fdk-aac (First checkout dabplus, build/install, then dabplus2)
+install_git_repo "https://github.com/Opendigitalradio/fdk-aac.git" "fdk-aac" "dabplus"
+install_git_repo "https://github.com/Opendigitalradio/fdk-aac.git" "fdk-aac" "dabplus2"
+
+# 2. ODR-AudioEnc (using 'next' branch and explicit options for alsa, jack, vlc, and gst)
+install_git_repo "https://github.com/Opendigitalradio/ODR-AudioEnc.git" "ODR-AudioEnc" "next" \
+  "--enable-alsa" "--enable-jack" "--enable-vlc" "--enable-gst"
+
+# 3. ODR-PadEnc
+install_git_repo "https://github.com/Opendigitalradio/ODR-PadEnc.git" "ODR-PadEnc" ""
+
+# 4. ODR-DabMux
+install_git_repo "https://github.com/Opendigitalradio/ODR-DabMux.git" "ODR-DabMux" ""
+
+# 5. ODR-DabMod (keeping original high-performance compilation flags)
+install_git_repo "https://github.com/Opendigitalradio/ODR-DabMod.git" "ODR-DabMod" "" \
   "CFLAGS=-O3 -DNDEBUG" "CXXFLAGS=-O3 -DNDEBUG" "--enable-fast-math" "--disable-output-uhd" "--disable-zeromq"
-install_git_repo "https://github.com/Opendigitalradio/ODR-SourceCompanion.git" "ODR-SourceCompanion"
+
+# 6. ODR-SourceCompanion
+install_git_repo "https://github.com/Opendigitalradio/ODR-SourceCompanion.git" "ODR-SourceCompanion" ""
+
+# 7. digris-edi-zmq-bridge (Added from the secondary script stack)
+install_git_repo "https://github.com/digris/digris-edi-zmq-bridge" "digris-edi-zmq-bridge" ""
+
 popd >/dev/null
 
 # User group setup
@@ -181,5 +210,19 @@ sudo systemctl restart supervisor
 sleep 2
 sudo supervisorctl reread
 sudo supervisorctl update
+
+# Optional clean-up stage for compilation source trees
+echo "--------------------------------------------------------"
+read -p "Do you want to remove the cloned source code repositories from ODR-mmbTools folder? (y/n): " choice
+if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
+    rm -rf "$TOOLS_DIR/fdk-aac" \
+           "$TOOLS_DIR/ODR-AudioEnc" \
+           "$TOOLS_DIR/ODR-PadEnc" \
+           "$TOOLS_DIR/ODR-DabMux" \
+           "$TOOLS_DIR/ODR-DabMod" \
+           "$TOOLS_DIR/ODR-SourceCompanion" \
+           "$TOOLS_DIR/digris-edi-zmq-bridge"
+    echo "Source code directories cleaned up."
+fi
 
 echo -e "${GREEN}Installation complete. Configuration preserved at: $CONFIG_DIR${NC}"
